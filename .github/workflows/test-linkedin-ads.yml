@@ -1,0 +1,182 @@
+name: Test LinkedIn Ads on Real Devices
+
+on:
+  # Run manually from Actions tab
+  workflow_dispatch:
+    inputs:
+      ad_url:
+        description: 'LinkedIn Ad URL to test'
+        required: true
+        default: 'https://lnkd.in/g6gTZavw'
+
+  # Or run automatically on push
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'test-my-ad.js'
+
+  # Or on schedule (daily at 9am)
+  schedule:
+    - cron: '0 9 * * *'
+
+jobs:
+  test-ios-simulator:
+    name: Test on iOS Simulator
+    runs-on: macos-latest
+
+    strategy:
+      matrix:
+        # Test multiple iOS versions
+        ios-version: ['17.5', '16.4']
+        device: ['iPhone 15 Pro', 'iPhone 14 Pro', 'iPhone SE (3rd generation)']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npx playwright install chromium webkit
+
+      - name: List available iOS simulators
+        run: xcrun simctl list devices available
+
+      - name: Start iOS Simulator
+        run: |
+          # Get device UDID
+          DEVICE_UDID=$(xcrun simctl list devices available | grep "${{ matrix.device }}" | grep "${{ matrix.ios-version }}" | head -1 | grep -o '[A-F0-9-]\{36\}')
+          echo "Starting simulator: $DEVICE_UDID"
+
+          # Boot simulator
+          xcrun simctl boot $DEVICE_UDID || true
+
+          # Wait for simulator to boot
+          sleep 10
+
+          # Open Simulator app
+          open -a Simulator
+
+          echo "SIMULATOR_UDID=$DEVICE_UDID" >> $GITHUB_ENV
+
+      - name: Run LinkedIn Ad Test
+        env:
+          TEST_URL: ${{ github.event.inputs.ad_url || 'https://lnkd.in/g6gTZavw' }}
+        run: |
+          # Run test with Playwright on the iOS simulator
+          node test-github-actions.js ios "${{ matrix.device }}" "${{ matrix.ios-version }}"
+
+      - name: Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-ios-${{ matrix.device }}-${{ matrix.ios-version }}
+          path: test-results/screenshots/*.png
+          retention-days: 30
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-ios-${{ matrix.device }}-${{ matrix.ios-version }}
+          path: test-results/*.json
+          retention-days: 30
+
+  test-android-emulator:
+    name: Test on Android Emulator
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        # Test multiple Android versions
+        api-level: [34, 33, 31]  # Android 14, 13, 12
+        device: ['pixel_7', 'pixel_6', 'Nexus 6']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npx playwright install chromium
+
+      - name: Enable KVM (for Android Emulator)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run Android Emulator & Test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: google_apis
+          arch: x86_64
+          profile: ${{ matrix.device }}
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            # Wait for emulator to be ready
+            adb wait-for-device
+            adb shell input keyevent 82  # Unlock device
+
+            # Run test
+            node test-github-actions.js android "${{ matrix.device }}" "API ${{ matrix.api-level }}"
+
+      - name: Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-android-${{ matrix.device }}-api${{ matrix.api-level }}
+          path: test-results/screenshots/*.png
+          retention-days: 30
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-android-${{ matrix.device }}-api${{ matrix.api-level }}
+          path: test-results/*.json
+          retention-days: 30
+
+  summary:
+    name: Generate Test Summary
+    runs-on: ubuntu-latest
+    needs: [test-ios-simulator, test-android-emulator]
+    if: always()
+
+    steps:
+      - name: Download all test results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: results-*
+          path: all-results
+
+      - name: Generate Summary
+        run: |
+          echo "# LinkedIn Ad Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Test URL:** ${{ github.event.inputs.ad_url || 'https://lnkd.in/g6gTZavw' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Count results
+          TOTAL=$(find all-results -name "*.json" | wc -l)
+          echo "**Total Tests:** $TOTAL" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # List all result files
+          echo "## Test Results by Device" >> $GITHUB_STEP_SUMMARY
+          find all-results -name "*.json" -exec echo "- {}" \; >> $GITHUB_STEP_SUMMARY
