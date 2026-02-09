@@ -115,12 +115,13 @@ export class RedirectTester {
           });
 
           if (isInterstitial) {
-            // Extract the actual destination URL from the page
+            redirects.push('LinkedIn Interstitial (detected)');
+
+            // Extract the destination URL from the page
             const destinationUrl = await page.evaluate(() => {
-              // Try to find the destination URL in various places
               const links = Array.from(document.querySelectorAll('a'));
 
-              // First, look for a link that's NOT a LinkedIn URL (the external destination)
+              // Find the external destination link
               const externalLink = links.find(a =>
                 a.href &&
                 !a.href.includes('linkedin.com') &&
@@ -128,45 +129,46 @@ export class RedirectTester {
                 a.href.startsWith('http')
               );
 
-              if (externalLink) {
-                return externalLink.href;
-              }
-
-              // Fallback: extract URL from body text
-              const urlInText = document.body.innerText.match(/https?:\/\/(?!.*linkedin\.com|.*lnkd\.in)[^\s]+/);
-              if (urlInText && urlInText[0]) {
-                return urlInText[0];
-              }
-
-              return null;
+              return externalLink ? externalLink.href : null;
             });
 
-            if (destinationUrl && !destinationUrl.includes('linkedin.com')) {
-              redirects.push('LinkedIn Interstitial (bypassed)');
+            if (destinationUrl) {
+              redirects.push(`Destination: ${destinationUrl}`);
 
-              // Navigate to the actual destination
-              const destResponse = await page.goto(destinationUrl, {
-                waitUntil: 'domcontentloaded',
-                timeout: 30000
-              });
+              // Navigate directly to the destination URL
+              try {
+                const destResponse = await page.goto(destinationUrl, {
+                  waitUntil: 'domcontentloaded',
+                  timeout: 30000
+                });
 
-              redirects.push(destinationUrl);
-              result.httpStatus = destResponse.status();
+                // Wait for page to fully render
+                await page.waitForTimeout(3000);
 
-              // Capture screenshot after following destination
-              if (captureScreenshots) {
-                try {
-                  await page.waitForTimeout(1000);
-                  const screenshot = await page.screenshot({ type: 'png', fullPage: false });
-                  result.screenshots.push({
-                    step: result.screenshots.length + 1,
-                    url: page.url(),
-                    image: screenshot.toString('base64'),
-                    timestamp: Date.now() - startTime
-                  });
-                } catch (screenshotError) {
-                  // Ignore screenshot errors
+                // Get the actual current URL after navigation
+                const currentUrl = page.url();
+                if (currentUrl !== destinationUrl && !redirects.includes(currentUrl)) {
+                  redirects.push(currentUrl);
                 }
+
+                // Capture screenshot of intermediate page (might be your redirector)
+                if (captureScreenshots) {
+                  try {
+                    const screenshot = await page.screenshot({ type: 'png', fullPage: false });
+                    result.screenshots.push({
+                      step: result.screenshots.length + 1,
+                      url: currentUrl, // Use the actual current URL, not page.url()
+                      image: screenshot.toString('base64'),
+                      timestamp: Date.now() - startTime
+                    });
+                  } catch (screenshotError) {
+                    // Ignore screenshot errors
+                  }
+                }
+
+              } catch (navError) {
+                // Navigation might fail - App Store links sometimes abort
+                await page.waitForTimeout(2000);
               }
             }
           }
@@ -176,10 +178,11 @@ export class RedirectTester {
         }
       }
 
-      // Capture final screenshot
+      // Capture final screenshot if we don't have enough yet
       if (captureScreenshots && result.screenshots.length < 3) {
         try {
-          await page.waitForTimeout(500);
+          // Wait longer to ensure page is fully loaded
+          await page.waitForTimeout(2000);
           const screenshot = await page.screenshot({ type: 'png', fullPage: false });
           result.screenshots.push({
             step: result.screenshots.length + 1,
